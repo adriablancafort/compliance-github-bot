@@ -6,13 +6,10 @@ import nock from "nock";
 import myProbotApp from "../src/index.js";
 import { Probot, ProbotOctokit } from "probot";
 // Requiring our fixtures
-//import payload from "./fixtures/issues.opened.json" with { "type": "json"};
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { describe, beforeEach, afterEach, test, expect } from "vitest";
-
-const issueCreatedBody = { body: "Thanks for opening this issue!" };
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -21,11 +18,11 @@ const privateKey = fs.readFileSync(
   "utf-8",
 );
 
-const payload = JSON.parse(
-  fs.readFileSync(path.join(__dirname, "fixtures/issues.opened.json"), "utf-8"),
+const pushPayload = JSON.parse(
+  fs.readFileSync(path.join(__dirname, "fixtures/push.json"), "utf-8"),
 );
 
-describe("My Probot app", () => {
+describe("Compliance GitHub Bot", () => {
   let probot: any;
 
   beforeEach(() => {
@@ -43,26 +40,114 @@ describe("My Probot app", () => {
     probot.load(myProbotApp);
   });
 
-  test("creates a comment when an issue is opened", async () => {
+  test("creates a compliance report when code is pushed to main", async () => {
     const mock = nock("https://api.github.com")
       // Test that we correctly return a test token
       .post("/app/installations/2/access_tokens")
       .reply(200, {
         token: "test",
         permissions: {
+          contents: "read",
           issues: "write",
         },
       })
-
-      // Test that a comment is posted
-      .post("/repos/hiimbex/testing-things/issues/1/comments", (body: any) => {
-        expect(body).toMatchObject(issueCreatedBody);
+      // Mock the commit details API call
+      .get("/repos/hiimbex/testing-things/commits/1234567890abcdef1234567890abcdef12345678")
+      .reply(200, {
+        sha: "1234567890abcdef1234567890abcdef12345678",
+        commit: {
+          message: "Add new feature",
+        },
+        files: [
+          {
+            filename: "src/app.js",
+            patch: "@@ -1,3 +1,4 @@\n console.log('test');\n const password = 'secret123';",
+          },
+        ],
+      })
+      // Test that an issue is created with compliance report
+      .post("/repos/hiimbex/testing-things/issues", (body: any) => {
+        expect(body.title).toContain("Compliance");
+        expect(body.body).toContain("Compliance Report");
+        expect(body.labels).toContain("compliance");
         return true;
       })
       .reply(200);
 
     // Receive a webhook event
-    await probot.receive({ name: "issues", payload });
+    await probot.receive({ name: "push", payload: pushPayload });
+
+    expect(mock.pendingMocks()).toStrictEqual([]);
+  });
+
+  test("detects hardcoded secrets", async () => {
+    const mock = nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, {
+        token: "test",
+        permissions: {
+          contents: "read",
+          issues: "write",
+        },
+      })
+      .get("/repos/hiimbex/testing-things/commits/1234567890abcdef1234567890abcdef12345678")
+      .reply(200, {
+        sha: "1234567890abcdef1234567890abcdef12345678",
+        commit: {
+          message: "Add API key",
+        },
+        files: [
+          {
+            filename: "config.js",
+            patch: '@@ -1,3 +1,4 @@\n const apiKey = "sk_live_12345";',
+          },
+        ],
+      })
+      .post("/repos/hiimbex/testing-things/issues", (body: any) => {
+        expect(body.title).toContain("Violations Detected");
+        expect(body.body).toContain("Hardcoded API key detected");
+        expect(body.labels).toContain("violation");
+        return true;
+      })
+      .reply(200);
+
+    await probot.receive({ name: "push", payload: pushPayload });
+
+    expect(mock.pendingMocks()).toStrictEqual([]);
+  });
+
+  test("passes compliance check for clean code", async () => {
+    const mock = nock("https://api.github.com")
+      .post("/app/installations/2/access_tokens")
+      .reply(200, {
+        token: "test",
+        permissions: {
+          contents: "read",
+          issues: "write",
+        },
+      })
+      .get("/repos/hiimbex/testing-things/commits/1234567890abcdef1234567890abcdef12345678")
+      .reply(200, {
+        sha: "1234567890abcdef1234567890abcdef12345678",
+        commit: {
+          message: "Add new feature",
+        },
+        files: [
+          {
+            filename: "src/utils.js",
+            patch: "@@ -1,3 +1,4 @@\n function add(a, b) { return a + b; }",
+          },
+        ],
+      })
+      .post("/repos/hiimbex/testing-things/issues", (body: any) => {
+        expect(body.title).toContain("Passed");
+        expect(body.body).toContain("All compliance checks passed");
+        expect(body.labels).toContain("passed");
+        return true;
+      })
+      .reply(200);
+
+    await probot.receive({ name: "push", payload: pushPayload });
 
     expect(mock.pendingMocks()).toStrictEqual([]);
   });
